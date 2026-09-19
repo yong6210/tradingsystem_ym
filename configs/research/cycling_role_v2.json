@@ -1,0 +1,14 @@
+{
+  "version": "cycling-role-v2",
+  "status": "research_input_contract_not_market_classifier",
+  "live_orders": false,
+  "base_execution_config_sha256": "6a097ce90b17142d661f2dcac76fdc3eb6c19fec6447affeef8ffaef6f8c2e44",
+  "local_bars_certify_main_direction": false,
+  "initial_side_is_verified_main_direction": false,
+  "unassessed_or_uncertain_main": "block_increase_preserve_separate_reduction_and_capacity_paths",
+  "main_direction_source": "explicit_external_assessment_with_available_provenance_and_declared_main_roles",
+  "reversal_requires": ["invalidation_linked_to_current_main_evidence", "opposite_formation", "distinct_provenance_events"],
+  "same_timestamp_direction_and_entry": "wait_for_fresh_reaction",
+  "reduction_and_sizing_rules": "unchanged_from_base_execution_config",
+  "market_truth_automatically_verified": false
+}

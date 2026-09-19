@@ -1,7 +1,7 @@
 """Isolated, fill-driven linear-contract cycling model; no live order routing.
 
 Direction and retracement decisions are explicit external inputs. This module
-does not invent a four-hour trend detector or entry sizing policy.
+does not invent a trend detector or entry sizing policy.
 """
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_CEILING
@@ -39,26 +39,63 @@ class DirectionalCycling:
         self._direction_signature = None
         self.events = []
 
-    def set_direction(self, side, *, timeframe, observed_ms, reason):
-        """Record an externally assessed 4h direction, not a raw candle vote."""
+    def set_direction(self, side, *, timeframe, observed_ms, reason, assessment=None):
+        """Accept explicit main-trend evidence; preserve legacy 4h event replay.
+
+        The assessment is an external assertion, not verification of market truth.
+        Omitting it selects the old research-only 4h compatibility path.
+        """
         if type(side) is not int or side not in (-1, 1):
             raise ValueError('invalid direction')
-        if timeframe != '4h' or not reason.strip():
-            raise ValueError('four-hour assessment and reason required')
+        if not isinstance(timeframe, str) or not timeframe.strip() or not isinstance(reason, str) or not reason.strip():
+            raise ValueError('source description and reason required')
+        if assessment is None:
+            if any(e['action'] == 'set_direction' and 'assessment' in e['args'] for e in self.events):
+                raise ValueError('cannot downgrade explicit thesis to legacy direction input')
+            if timeframe != '4h':
+                raise ValueError('explicit main-trend assessment required outside legacy replay')
+        else:
+            from copy import deepcopy
+            assessment = deepcopy(assessment)
+            if not isinstance(assessment, dict) or assessment.get('scope') != 'main_trend' or assessment.get('confirmed') is not True:
+                raise ValueError('confirmed main-trend assessment required')
+            if assessment.get('kind') not in ('initial', 'maintain', 'reversal'):
+                raise ValueError('explicit assessment kind required')
+            evidence = assessment.get('evidence_ids')
+            if not isinstance(evidence, list) or not evidence or any(not isinstance(e, str) or not e.strip() for e in evidence) or len(set(evidence)) != len(evidence):
+                raise ValueError('distinct evidence references required')
+            invalidation = assessment.get('invalidation_condition')
+            if not isinstance(invalidation, str) or not invalidation.strip():
+                raise ValueError('thesis invalidation condition required')
+            if assessment['kind'] == 'reversal':
+                invalidated = assessment.get('prior_thesis_invalidated_by')
+                if not isinstance(invalidated, str) or not invalidated.strip():
+                    raise ValueError('prior thesis invalidation reason required')
         if type(observed_ms) is not int or observed_ms < 0:
             raise ValueError('invalid assessment time')
-        signature = (side, reason)
+        if assessment is not None and 'evidence_audit' in assessment:
+            from .thesis_evidence import verify_audit
+            verify_audit(assessment, observed_ms)
+        import json
+        signature = (side, reason) if assessment is None else (side, reason, timeframe,
+            json.dumps(assessment, sort_keys=True, ensure_ascii=False))
         if observed_ms < self._direction_time:
             raise ValueError('stale assessment')
         if observed_ms == self._direction_time:
             if signature != self._direction_signature:
                 raise ValueError('conflicting assessment')
             return
+        if assessment is not None:
+            expected = 'initial' if self.direction is None else 'maintain' if side == self.direction else 'reversal'
+            if assessment['kind'] != expected:
+                raise ValueError('assessment kind conflicts with current thesis')
         self.direction = side
         self._direction_time = observed_ms
         self._direction_signature = signature
-        self.events.append(dict(action='set_direction', args=dict(side=side, timeframe=timeframe,
-                           observed_ms=observed_ms, reason=reason)))
+        args = dict(side=side, timeframe=timeframe, observed_ms=observed_ms, reason=reason)
+        if assessment is not None:
+            args['assessment'] = assessment
+        self.events.append(dict(action='set_direction', args=args))
 
     def _quantity(self, value):
         qty = positive(value)
@@ -145,6 +182,27 @@ class DirectionalCycling:
         if self.reduction is not None:
             self.reduction = None
             self.events.append(dict(action='supersede_reduction', args=dict(reason=reason)))
+
+    def resume_reduction(self, event_id, reason):
+        """Resume a superseded target only while inventory has not changed."""
+        if not isinstance(reason,str) or not reason.strip() or event_id not in self._reductions:
+            raise ValueError('known reduction and reason required')
+        if self.reduction is not None:raise ValueError('another reduction is current')
+        last=next((i for i in range(len(self.events)-1,-1,-1)
+                   if self.events[i]['action']=='supersede_reduction'),None)
+        if last is None or any(e['action'] in ('increase','reduce','set_direction','begin_retracement','resume_reduction')
+                               for e in self.events[last+1:]):
+            raise ValueError('inventory/thesis changed since supersession')
+        # The event immediately superseded must be the requested one.
+        prior=None
+        for e in self.events[:last]:
+            if e['action'] in ('begin_retracement','resume_reduction'):prior=e['args']['event_id']
+            elif e['action']=='supersede_reduction':prior=None
+        target=self._reductions[event_id][1]
+        if prior!=event_id or not 0<target.remaining<=self.quantity:
+            raise ValueError('cannot resume this superseded target')
+        self.reduction=target
+        self.events.append(dict(action='resume_reduction',args=dict(event_id=event_id,reason=reason)))
 
     def funding(self, event_id, signed_cost):
         """Positive means paid; negative means received. Apply once per event."""

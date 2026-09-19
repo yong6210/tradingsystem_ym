@@ -1,0 +1,50 @@
+{
+  "version": "cycling-decision-trial-v1",
+  "status": "frozen_research_proposal_not_validated_strategy",
+  "live_orders": false,
+  "confirmed_user_principles": {
+    "same_direction_cycling": true,
+    "opposite_entry_requires_main_trend_reversal": true,
+    "mandatory_direction_timeframe": null,
+    "retracement_minimum_total_fraction": "0.5",
+    "campaign_break_even_required_for_reduction": false,
+    "fixed_price_stop": null,
+    "maximum_holding_minutes": null
+  },
+  "trial_choices": {
+    "zone_roles": ["main_origin", "main_boundary", "execution", "historical_reference"],
+    "zone_selection": "pre_registered_reviewed_manifest_not_automatic_importance",
+    "zone_manifest_changes": "prospective_versions_only",
+    "reaction_input": "completed_1m_ohlc",
+    "departure": "whole_completed_bar_outside_band_after_observed_contact",
+    "retest": "later_contact_after_whole_bar_outside",
+    "favorable_close": "strictly_above_upper_for_long_or_below_lower_for_short",
+    "ambiguous_bar": "both_outer_boundaries_crossed_blocks_new_entry_and_reversal_confirmation",
+    "initial_direction": "departure_from_origin_then_cross_distinct_main_boundary_then_favorable_retest_of_boundary",
+    "direction_weakening": "close_beyond_adverse_edge_of_frozen_main_origin",
+    "reversal": "weakened_origin_then_separate_retest_closes_on_opposite_side",
+    "reversal_execution": "cancel_reconcile_flatten_then_wait_for_fresh_opposite_entry_reaction",
+    "retracement_trigger": "predeclared_exit_zone_reached_from_favorable_travel_then_close_back_on_approach_side",
+    "retracement_fraction": "0.5",
+    "reduction_deduplication": "one_intent_per_position_growth_cycle_and_reaction_episode",
+    "increase_trigger": "main_direction_valid_and_registered_execution_zone_favorable_retest",
+    "increase_purpose": ["nearby_cycle", "campaign_recovery"],
+    "nearby_cycle_gate": "declared_exit_zone_and_positive_marginal_net_after_costs",
+    "campaign_recovery_gate": "declared_exit_zone_and_improved_campaign_recovery_and_all_explicit_capacity_limits",
+    "target_changes": "no_farther_target_substitution_to_rescue_failed_admission",
+    "increase_quantity": "minimum_of_predeclared_requested_size_and_capacity_ceiling_rounded_down",
+    "local_basis_failure": "block_reuse_of_failed_reaction_without_main_direction_flip",
+    "weak_loss_reduction": "local_increase_basis_failed_and_limits_exceeded_then_minimum_executable_reduction_restoring_limits",
+    "missing_inputs": "unassessed_no_new_exposure_no_automatic_liquidation"
+  },
+  "run_required_inputs": [
+    "data_source_hashes", "decision_start_ms", "decision_end_ms",
+    "zone_manifest_with_roles_rationale_and_available_ms",
+    "initial_position_and_direction_or_unknown",
+    "requested_increase_quantity", "increase_purpose", "declared_exit_zone_id",
+    "fee_spread_slippage_funding_model", "execution_and_minimum_order_limits",
+    "free_margin_reserve_exposure_and_stress_limits"
+  ],
+  "evaluation_order": ["execution_reconciliation", "confirmed_reversal", "explicit_capacity_violation", "retracement_reduce", "increase", "wait_or_unassessed"],
+  "numerical_defaults_for_account_limits": null
+}

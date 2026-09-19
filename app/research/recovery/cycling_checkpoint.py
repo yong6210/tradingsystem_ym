@@ -41,7 +41,7 @@ def restore(payload):
     costs = Costs(**body['costs'])
     model = DirectionalCycling(costs.step)
     actions = {'set_direction', 'increase', 'reduce', 'begin_retracement',
-               'funding', 'supersede_reduction'}
+               'funding', 'supersede_reduction', 'resume_reduction'}
     for event in body['events']:
         if event['action'] not in actions:
             raise ValueError('unknown ledger event')
@@ -55,7 +55,7 @@ def restore(payload):
             data[name] = dec(data[name])
         data['price_cap'] = None if data['price_cap'] is None else dec(data['price_cap'])
         order = CyclingOrder(**data)
-        if (key != order.id or not key or order.kind not in ('increase', 'reduce', 'exit') or
+        if (key != order.id or not key or order.kind not in ('increase', 'reduce', 'exit', 'trim', 'limit_reduce') or
                 type(order.side) is not int or order.side not in (-1, 1) or
                 order.status not in ('open', 'cancel_pending', 'filled', 'cancelled') or
                 order.quantity <= 0 or order.quantity % costs.step or order.filled % costs.step or
@@ -65,9 +65,12 @@ def restore(payload):
         if order.kind == 'increase':
             if order.price_cap is None or order.price_cap <= 0 or order.event_id is not None:
                 raise ValueError('invalid increasing order')
+        elif order.kind == 'limit_reduce':
+            if order.price_cap is None or order.price_cap <= 0 or order.price_cap % costs.tick or order.event_id not in model._reductions:
+                raise ValueError('invalid limit reduction order')
         elif order.price_cap is not None or (order.kind == 'reduce' and order.event_id not in model._reductions):
             raise ValueError('invalid reduction order')
-        elif order.kind == 'exit' and order.event_id is not None:
+        elif order.kind in ('exit', 'trim') and order.event_id is not None:
             raise ValueError('invalid exit order')
         controller.orders[key] = order
     active = [o for o in controller.orders.values() if o.status in ('open', 'cancel_pending')]
@@ -84,16 +87,18 @@ def restore(payload):
             raise ValueError('order fill disagrees with ledger')
         if order.kind == 'increase' and order.side * (price - order.price_cap) > 0:
             raise ValueError('fill exceeds entry cap')
+        if order.kind == 'limit_reduce' and order.side*(price-order.price_cap)<0:
+            raise ValueError('reduction fill violates limit price')
         controller.fills[key] = (order_id, qty, price, fee)
         totals[order_id] += qty
     if any(totals[k] != o.filled for k, o in controller.orders.items()):
         raise ValueError('order cumulative fill mismatch')
     if active:
         order = active[0]
-        if order.kind in ('reduce', 'exit'):
+        if order.kind in ('reduce', 'exit', 'trim', 'limit_reduce'):
             if order.side != model.position_side or order.remaining > model.quantity:
                 raise ValueError('active reduction exceeds position')
-            if order.kind == 'reduce' and (model.reduction is None or
+            if order.kind in ('reduce','limit_reduce') and (model.reduction is None or
                     order.event_id != model.reduction.event_id or
                     order.remaining != model.reduction.remaining):
                 raise ValueError('active reduction disagrees with target')

@@ -88,6 +88,15 @@ class CyclingOrders:
                                             self.model.position_side, None, event_id)
         return self.orders[order_id]
 
+    def limit_retracement(self, order_id, event_id, *, limit_price, fraction='0.5'):
+        price=positive(limit_price)
+        if price % self.costs.tick:
+            raise ValueError('limit price must be tick aligned')
+        order=self.retracement(order_id,event_id,reference_price=price,fraction=fraction)
+        order.kind='limit_reduce'
+        order.price_cap=price
+        return order
+
     def request_cancel(self, order_id):
         order = self.orders[order_id]
         if order.status == 'open':
@@ -125,6 +134,8 @@ class CyclingOrders:
                 raise ValueError('fill exceeds entry limit')
             self.model.increase(fill_id, order.side, qty, price, fee)
         else:
+            if order.kind=='limit_reduce' and order.side*(price-order.price_cap)<0:
+                raise ValueError('reduction fill violates limit price')
             self.model.reduce(fill_id, qty, price, fee, event_id=order.event_id)
         order.filled += qty
         if not order.remaining:
@@ -135,6 +146,15 @@ class CyclingOrders:
             self.model.supersede_reduction('trend transition completed flat')
             self.transition = None
         return True
+
+    def set_direction_from_evidence(self, side, *, registry, assessment, **context):
+        """Resolve known, available evidence before any cancellation or state change."""
+        from .thesis_evidence import validated_assessment
+        checked = validated_assessment(registry, assessment, observed_ms=context['observed_ms'])
+        if self.model.direction is not None and side != self.model.direction:
+            self.request_transition(side, assessment=checked, **context)
+        else:
+            self.set_direction(side, assessment=checked, **context)
 
     def set_direction(self, side, **assessment):
         if self.active:
@@ -147,11 +167,11 @@ class CyclingOrders:
             self.model.set_direction(side, **assessment)
 
     def request_transition(self, side, **assessment):
-        """Explicit 4h assessment; cancellation first, no reversal fill yet."""
+        """Explicit trend assessment; cancellation first, no reversal fill yet."""
         from copy import deepcopy
         if self.locked or self.restart_required:
             raise ValueError('reconciliation required')
-        candidate = dict(side=side, **assessment)
+        candidate = deepcopy(dict(side=side, **assessment))
         if self.transition:
             if self.transition != candidate:
                 raise ValueError('finish pending transition before another assessment')
@@ -159,7 +179,7 @@ class CyclingOrders:
         probe = deepcopy(self.model)
         probe.set_direction(**candidate)  # Validate before mutating/cancelling.
         if side == self.model.direction:
-            raise ValueError('transition requires a changed four-hour direction')
+            raise ValueError('transition requires a changed main direction')
         self.transition = candidate
         if self.active:
             self.request_cancel(self.active.id)
@@ -181,7 +201,7 @@ class CyclingOrders:
         if not self.costs.executable(self.model.quantity, price):
             raise ValueError('exit below minimum order; explicit resolution required')
         self.model.set_direction(**self.transition)
-        self.model.supersede_reduction('four-hour trend reversal full exit')
+        self.model.supersede_reduction('confirmed trend reversal full exit')
         order = CyclingOrder(order_id, 'exit', self.model.quantity,
                              self.model.position_side, None, None)
         self.orders[order_id] = order
